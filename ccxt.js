@@ -2967,6 +2967,7 @@ var bitcoincoid = {
                 'tradeHistory',
                 'openOrders',
                 'cancelOrder',
+                'orderHistory',
             ],
         },
     },
@@ -3054,6 +3055,85 @@ var bitcoincoid = {
             'price': parseFloat (trade['price']),
             'amount': parseFloat (trade['amount']),
         };
+    },
+
+    parseOrder (order, market = undefined) {
+        let side = undefined;
+        if ('type' in order)
+            side = order['type'];
+        let status = this.safeString (order, 'status', 'open');
+        if (status === 'filled') {
+            status = 'closed';
+        } else if (status === 'calcelled') {
+            status = 'canceled';
+        }
+        let symbol = undefined;
+        let cost = undefined;
+        let price = this.safeFloat (order, 'price');
+        let amount = undefined;
+        let remaining = undefined;
+        let filled = undefined;
+        if (market) {
+            symbol = market['symbol'];
+            let quoteId = market['quoteId'];
+            let baseId = market['baseId'];
+            if ((market['quoteId'] === 'idr') && ('order_rp' in order))
+                quoteId = 'rp';
+            if ((market['baseId'] === 'idr') && ('remain_rp' in order))
+                baseId = 'rp';
+            cost = this.safeFloat (order, 'order_' + quoteId);
+            if (cost) {
+                amount = cost / price;
+                let remainingCost = this.safeFloat (order, 'remain_' + quoteId);
+                if (typeof remainingCost !== 'undefined') {
+                    remaining = remainingCost / price;
+                    filled = amount - remaining;
+                }
+            } else {
+                amount = this.safeFloat (order, 'order_' + baseId);
+                cost = price * amount;
+                remaining = this.safeFloat (order, 'remain_' + baseId);
+                filled = amount - remaining;
+            }
+        }
+        let average = undefined;
+        if (filled)
+            average = cost / filled;
+        let timestamp = parseInt (order['submit_time']);
+        let fee = undefined;
+        let result = {
+            'info': order,
+            'id': order['order_id'],
+            'timestamp': timestamp,
+            'datetime': this.iso8601 (timestamp),
+            'symbol': symbol,
+            'type': 'limit',
+            'side': side,
+            'price': price,
+            'cost': cost,
+            'average': average,
+            'amount': amount,
+            'filled': filled,
+            'remaining': remaining,
+            'status': status,
+            'fee': fee,
+        };
+        return result;
+    },
+
+    async fetchClosedOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        if (!symbol)
+            throw new ExchangeError (this.id + ' fetchOrders requires a symbol');
+        await this.loadMarkets ();
+        let request = {};
+        let market = undefined;
+        if (symbol) {
+            market = this.market (symbol);
+            request['pair'] = market['id'];
+        }
+        let response = await this.privatePostOrderHistory (this.extend (request, params));
+        let orders = this.parseOrders (response['return']['orders'], market, since, limit);
+        return orders;
     },
 
     async fetchTrades (symbol, params = {}) {
@@ -15495,7 +15575,17 @@ var livecoin = {
     'name': 'LiveCoin',
     'countries': [ 'US', 'UK', 'RU' ],
     'rateLimit': 1000,
-    'hasCORS': false,
+    'has': {
+        'fetchDepositAddress': true,
+        'CORS': false,
+        'fetchTickers': true,
+        'fetchCurrencies': true,
+        'fetchFees': true,
+        'fetchOrders': true,
+        'fetchOpenOrders': true,
+        'fetchClosedOrders': true,
+        'withdraw': true,
+    },
     'hasFetchTickers': true,
     'urls': {
         'logo': 'https://user-images.githubusercontent.com/1294454/27980768-f22fc424-638a-11e7-89c9-6010a54ff9be.jpg',
@@ -15673,11 +15763,43 @@ var livecoin = {
         return this.parseTrades (response, market);
     },
 
+    async fetchOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets ();
+        let market = undefined;
+        if (symbol)
+            market = this.market (symbol);
+        let pair = market ? market['id'] : undefined;
+        let request = {};
+        if (pair)
+            request['currencyPair'] = pair;
+        if (typeof since !== 'undefined')
+            request['issuedFrom'] = parseInt (since);
+        if (typeof limit !== 'undefined')
+            request['endRow'] = limit - 1;
+        let response = await this.privateGetExchangeClientOrders (this.extend (request, params));
+        let result = [];
+        let rawOrders = [];
+        if (response['data'])
+            rawOrders = response['data'];
+        for (let i = 0; i < rawOrders.length; i++) {
+            let order = rawOrders[i];
+            result.push (this.parseOrder (order, market));
+        }
+        return result;
+    },
+
+    async fetchOpenOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        let result = await this.fetchOrders (symbol, since, limit, this.extend ({
+            'openClosed': 'OPEN',
+        }, params));
+        return result;
+    },
+
     async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
         await this.loadMarkets ();
         let method = 'privatePostExchange' + this.capitalize (side) + type;
         let order = {
-            'currencyPair': this.marketId (symbol),
+            'currencyPair': 'ETH/USD',
             'quantity': amount,
         };
         if (type == 'limit')
@@ -15685,30 +15807,44 @@ var livecoin = {
         let response = await this[method] (this.extend (order, params));
         return {
             'info': response,
-            'id': response['id'].toString (),
+            // 'id': response['id'].toString (),
         };
     },
 
     async cancelOrder (id, symbol = undefined, params = {}) {
         await this.loadMarkets ();
-        return await this.privatePostExchangeCancellimit (this.extend ({
+        let market = this.market (symbol);
+        let response = await this.privatePostExchangeCancellimit (this.extend ({
             'orderId': id,
+            'currencyPair': 'ETH/USD',
         }, params));
+        let message = this.safeString (response, 'message', this.json (response));
+        if ('success' in response) {
+            if (!response['success']) {
+                throw new InvalidOrder (message);
+            } else if ('cancelled' in response) {
+                if (response['cancelled']) {
+                    return response;
+                } else {
+                    throw new OrderNotFound (message);
+                }
+            }
+        }
+        throw new ExchangeError (this.id + ' cancelOrder() failed: ' + this.json (response));
     },
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
         let url = this.urls['api'] + '/' + path;
-        if (api == 'public') {
-            if (Object.keys (params).length)
-                url += '?' + this.urlencode (params);
-        } else {
-            let query = this.urlencode (this.keysort (params));
-            if (method == 'GET')
-                if (query)
-                    url += '?' + query;
-            else
-                if (query)
-                    body = query;
+        let query = this.urlencode (this.keysort (params));
+        if (method === 'GET') {
+            if (Object.keys (params).length) {
+                url += '?' + query;
+            }
+        }
+        if (api === 'private') {
+            
+            if (method === 'POST')
+                body = query;
             let signature = this.hmac (this.encode (query), this.encode (this.secret), 'sha256');
             headers = {
                 'Api-Key': this.apiKey,
@@ -15993,42 +16129,45 @@ var liqui = {
     },
 
     async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
-        if (type == 'market')
-            throw new ExchangeError (this.id + ' allows limit orders only');
         await this.loadMarkets ();
+        let method = 'privatePostExchange' + this.capitalize (side) + type;
         let market = this.market (symbol);
-        let request = {
-            'pair': market['id'],
-            'type': side,
-            'amount': this.amountToPrecision (symbol, amount),
-            'rate': this.priceToPrecision (symbol, price),
-        };
-        let response = await this.privatePostTrade (this.extend (request, params));
-        let id = response['return']['order_id'].toString ();
-        let timestamp = this.milliseconds ();
         let order = {
-            'id': id,
-            'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
-            'status': 'open',
-            'symbol': symbol,
-            'type': type,
-            'side': side,
-            'price': price,
-            'cost': price * amount,
-            'amount': amount,
-            'remaining': amount,
-            'filled': 0.0,
-            'fee': undefined,
-            // 'trades': this.parseTrades (order['trades'], market),
+            'quantity': this.amountToPrecision (symbol, amount),
+            'currencyPair': 'ETH/USD',
         };
-        this.orders[id] = order;
-        return this.extend ({ 'info': response }, order);
+        if (type === 'limit')
+            order['price'] = this.priceToPrecision (symbol, price);
+        let response = await this[method] (this.extend (order, params));
+        return {
+            'info': response,
+            'id': response['orderId'].toString (),
+        };
     },
 
     async cancelOrder (id, symbol = undefined, params = {}) {
+        if (!symbol)
+            throw new ExchangeError (this.id + ' cancelOrder requires a symbol argument');
         await this.loadMarkets ();
-        return await this.privatePostCancelOrder ({ 'order_id': parseInt (id) });
+        let market = this.market (symbol);
+        let currencyPair = market['id'];
+        let response = await this.privatePostExchangeCancellimit (this.extend ({
+            'orderId': id,
+            'currencyPair': currencyPair,
+        }, params));
+        let message = this.safeString (response, 'message', this.json (response));
+        if ('success' in response) {
+            if (!response['success']) {
+                throw new InvalidOrder (message);
+            } else if ('cancelled' in response) {
+                if (response['cancelled']) {
+                    return response;
+                } else {
+                    throw new OrderNotFound (message);
+                }
+            }
+        }
+        throw new ExchangeError (this.id + ' cancelOrder() failed: ' + this.json (response));
     },
 
     parseOrder (order) {
@@ -18314,7 +18453,7 @@ var quadrigacx = {
     },
 
     nonce () {
-        return this.milliseconds ();
+        return this.microseconds ();
     },
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
