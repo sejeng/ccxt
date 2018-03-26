@@ -16129,45 +16129,62 @@ var liqui = {
     },
 
     async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
+        if (type === 'market')
+            throw new ExchangeError (this.id + ' allows limit orders only');
         await this.loadMarkets ();
-        let method = 'privatePostExchange' + this.capitalize (side) + type;
         let market = this.market (symbol);
+        let request = {
+            'pair': market['id'],
+            'type': side,
+            'amount': this.amountToPrecision (symbol, amount),
+            'rate': this.priceToPrecision (symbol, price),
+        };
+        let response = await this.privatePostTrade (this.extend (request, params));
+        let id = this.safeString (response['return'], this.getOrderIdKey ());
+        let timestamp = this.milliseconds ();
+        price = parseFloat (price);
+        amount = parseFloat (amount);
+        let status = 'open';
+        if (id === '0') {
+            id = this.safeString (response['return'], 'init_order_id');
+            status = 'closed';
+        }
+        let filled = this.safeFloat (response['return'], 'received', 0.0);
+        let remaining = this.safeFloat (response['return'], 'remains', amount);
         let order = {
-            'quantity': this.amountToPrecision (symbol, amount),
-            'currencyPair': 'ETH/USD',
+            'id': id,
+            'timestamp': timestamp,
+            'datetime': this.iso8601 (timestamp),
+            'status': status,
+            'symbol': symbol,
+            'type': type,
+            'side': side,
+            'price': price,
+            'cost': price * filled,
+            'amount': amount,
+            'remaining': remaining,
+            'filled': filled,
+            'fee': undefined,
+            // 'trades': this.parseTrades (order['trades'], market),
         };
-        if (type === 'limit')
-            order['price'] = this.priceToPrecision (symbol, price);
-        let response = await this[method] (this.extend (order, params));
-        return {
-            'info': response,
-            'id': response['orderId'].toString (),
-        };
+        this.orders[id] = order;
+        return this.extend ({ 'info': response }, order);
+    },
+
+    getOrderIdKey () {
+        return 'order_id';
     },
 
     async cancelOrder (id, symbol = undefined, params = {}) {
-        if (!symbol)
-            throw new ExchangeError (this.id + ' cancelOrder requires a symbol argument');
         await this.loadMarkets ();
-        let market = this.market (symbol);
-        let currencyPair = market['id'];
-        let response = await this.privatePostExchangeCancellimit (this.extend ({
-            'orderId': id,
-            'currencyPair': currencyPair,
-        }, params));
-        let message = this.safeString (response, 'message', this.json (response));
-        if ('success' in response) {
-            if (!response['success']) {
-                throw new InvalidOrder (message);
-            } else if ('cancelled' in response) {
-                if (response['cancelled']) {
-                    return response;
-                } else {
-                    throw new OrderNotFound (message);
-                }
-            }
-        }
-        throw new ExchangeError (this.id + ' cancelOrder() failed: ' + this.json (response));
+        let response = undefined;
+        let request = {};
+        let idKey = this.getOrderIdKey ();
+        request[idKey] = id;
+        response = await this.privatePostCancelOrder (this.extend (request, params));
+        if (id in this.orders)
+            this.orders[id]['status'] = 'canceled';
+        return response;
     },
 
     parseOrder (order) {
@@ -16313,6 +16330,7 @@ var liqui = {
             'id': response['return']['tId'],
         };
     },
+
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
         let url = this.urls['api'][api];
