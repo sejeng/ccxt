@@ -9192,9 +9192,46 @@ var cex = {
         };
     },
 
+    async replaceOrder (symbol, orderId, type, side, amount, price = undefined, params = {}) {
+        await this.loadMarkets ();
+        let order = {
+            'pair': this.marketId (symbol),
+            'type': side,
+            'amount': amount,
+            'order_id': orderId,
+        };
+        if (type == 'limit')
+            order['price'] = price;
+        else
+            order['order_type'] = type;
+        let response = await this.privatePostCancelReplaceOrderPair (this.extend (order, params));
+        return {
+            'info': response,
+            'id': response['id'],
+        };
+    },
+
     async cancelOrder (id, symbol = undefined, params = {}) {
         await this.loadMarkets ();
         return await this.privatePostCancelOrder ({ 'id': id });
+    },
+
+    async cancelAllOrders (symbol = undefined, params = {}) {
+        await this.loadMarkets ();
+        
+        let request = {};
+        let method = 'privatePostCancelOrders';
+        let market = undefined;
+        if (symbol) {
+            market = this.market (symbol);
+            request['pair'] = market['id'];
+            method += 'Pair';
+        }
+        // for (let i = 0; i < orders.length; i++) {
+        //     orders[i] = this.extend (orders[i], { 'status': 'open' });
+        // }
+        return await this[method] (this.extend (request, params));//this.parseOrders (orders, market);
+
     },
 
     async fetchOrder (id, symbol = undefined, params = {}) {
