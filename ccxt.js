@@ -4859,16 +4859,12 @@ var bitmarket = {
             'amount': amount,
             'rate': price,
         }, params));
-        let result = {
-            'info': response,
-        };
-        if ('id' in response['order'])
-            result['id'] = response['id'];
-        return result;
+        return response;
     },
 
     async cancelOrder (id, symbol = undefined, params = {}) {
-        return await this.privatePostCancel ({ 'id': id });
+        let response = await this.privatePostCancel ({ 'id': id });
+        return response;
     },
 
     isFiat (currency) {
